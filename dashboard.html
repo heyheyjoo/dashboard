@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>방패 대시보드</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.263.1/umd/lucide.min.js"></script>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet"/>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'Apple SD Gothic Neo', 'Noto Sans KR', sans-serif; }
+  input[type=range] { -webkit-appearance: none; appearance: none; height: 8px; border-radius: 9999px; outline: none; cursor: pointer; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: white; border: 2px solid var(--thumb-color, #6366f1); box-shadow: 0 1px 4px rgba(0,0,0,0.15); cursor: pointer; }
+  input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: white; border: 2px solid var(--thumb-color, #6366f1); cursor: pointer; }
+  input[type=date]::-webkit-calendar-picker-indicator { opacity: 0.5; cursor: pointer; }
+  textarea { font-family: inherit; }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .pulse-warn { animation: pulseWarn 2s ease-in-out infinite; }
+  @keyframes pulseWarn { 0%,100% { opacity:1; } 50% { opacity:0.85; } }
+  .btn-hover:hover { transform: scale(1.04); }
+  .btn-hover:active { transform: scale(0.96); }
+  .card { background: white; border-radius: 16px; box-shadow: 0 2px 16px rgba(0,0,0,0.06), 0 1px 4px rgba(0,0,0,0.04); }
+  .star-btn:hover { transform: scale(1.15); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ── Config ─────────────────────────────────────────────────
+const SUPABASE_URL = "https://lkebexrcolnxqyjeszgs.supabase.co";
+const SUPABASE_KEY = "sb_publishable_raYRR0FC94KqKMz78hmmbg_1cZ4mFV8";
+const API = `${SUPABASE_URL}/rest/v1`;
+const AUTH = `${SUPABASE_URL}/auth/v1`;
+
+// ── Supabase ───────────────────────────────────────────────
+function getToken() { return localStorage.getItem("sb_token"); }
+function getUser()  { try { return JSON.parse(localStorage.getItem("sb_user")); } catch { return null; } }
+function setToken(t){ localStorage.setItem("sb_token", t); }
+function setUser(u) { localStorage.setItem("sb_user", JSON.stringify(u)); }
+function clearAuth(){ localStorage.removeItem("sb_token"); localStorage.removeItem("sb_user"); }
+
+async function sbFetch(url, opts={}) {
+  const token = getToken();
+  const res = await fetch(url, {
+    ...opts,
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${token || SUPABASE_KEY}`,
+      ...(opts.headers||{})
+    }
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new Error(data?.error_description || data?.message || data?.error || "오류가 발생했어요");
+  return data;
+}
+
+async function signUp(email, pw) {
+  const d = await sbFetch(`${AUTH}/signup`, { method:"POST", body: JSON.stringify({email, password:pw}) });
+  if (d.access_token) { setToken(d.access_token); setUser(d.user); }
+  return d;
+}
+async function signIn(email, pw) {
+  const d = await sbFetch(`${AUTH}/token?grant_type=password`, { method:"POST", body: JSON.stringify({email, password:pw}) });
+  setToken(d.access_token); setUser(d.user); return d;
+}
+async function signOut() {
+  try { await sbFetch(`${AUTH}/logout`, { method:"POST" }); } catch {}
+  clearAuth();
+}
+async function loadAllEntries(email) {
+  const d = await sbFetch(`${API}/dashboard_entries?user_email=eq.${encodeURIComponent(email)}&select=entry_date,data&order=entry_date.desc`);
+  const r = {}; (d||[]).forEach(row => { r[row.entry_date] = row.data; }); return r;
+}
+async function loadEntry(email, date) {
+  const d = await sbFetch(`${API}/dashboard_entries?user_email=eq.${encodeURIComponent(email)}&entry_date=eq.${date}&select=data`);
+  return d && d.length > 0 ? d[0].data : null;
+}
+async function saveEntry(email, date, data) {
+  await sbFetch(`${API}/dashboard_entries`, {
+    method: "POST",
+    headers: { "Prefer": "resolution=merge-duplicates" },
+    body: JSON.stringify({ user_email: email, entry_date: date, data, updated_at: new Date().toISOString() })
+  });
+}
+
+// ── Defaults ───────────────────────────────────────────────
+const defaultEntry = () => ({
+  weeklyGoal:0, proactiveScore:0, deepFocusHours:0, deepFocusMinutes:0, anxietyDefenseCount:0,
+  routineYoga:false, routinePT:false, routinePersonal:false,
+  physicalEnergy:50, postWorkoutRefresh:0, bodyWeight:"", poopDone:null,
+  emotionalDrain:0, chatbotMode:null, rewardRuleMet:null,
+  metacognitionLog:"", selfCompassionCount:0, moodLog:"", moodScore:0,
+});
+
+const C = { study:"#6366f1", workout:"#0d9488", romance:"#f43f5e", mental:"#f59e0b", health:"#10b981" };
+
+function formatDate(d) { return d.toISOString().split("T")[0]; }
+function parseDate(s) { const [y,m,d]=s.split("-").map(Number); return new Date(y,m-1,d); }
+
+// ── Icons (lucide) ─────────────────────────────────────────
+function Icon({ name, size=16, color, className="" }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current && window.lucide) {
+      ref.current.innerHTML = "";
+      const el = document.createElementNS("http://www.w3.org/2000/svg","svg");
+      el.setAttribute("width", size); el.setAttribute("height", size);
+      el.setAttribute("viewBox","0 0 24 24"); el.setAttribute("fill","none");
+      el.setAttribute("stroke", color||"currentColor");
+      el.setAttribute("stroke-width","2"); el.setAttribute("stroke-linecap","round");
+      el.setAttribute("stroke-linejoin","round");
+      const iconDef = window.lucide[name.replace(/-./g, m => m[1].toUpperCase())];
+      if (iconDef && iconDef[2]) {
+        iconDef[2].forEach(([tag, attrs]) => {
+          const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+          Object.entries(attrs||{}).forEach(([k,v]) => node.setAttribute(k,v));
+          el.appendChild(node);
+        });
+      }
+      ref.current.appendChild(el);
+    }
+  }, [name, size, color]);
+  return <span ref={ref} className={`inline-flex items-center justify-center ${className}`} style={{lineHeight:0}}/>;
+}
+
+// ── UI Components ──────────────────────────────────────────
+function SectionCard({ emoji, title, subtitle, color, children }) {
+  return (
+    <div className="card p-5 flex flex-col" style={{gap:"16px"}}>
+      <div className="flex items-center gap-3 pb-3" style={{borderBottom:"1px solid #f1f5f9"}}>
+        <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg" style={{background:color+"18"}}>{emoji}</div>
+        <div>
+          <div className="text-sm font-bold text-gray-800">{title}</div>
+          <div className="text-xs mt-0.5" style={{color:"#94a3b8"}}>{subtitle}</div>
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function Label({ children, hint }) {
+  return (
+    <div style={{marginBottom:"8px"}}>
+      <div className="text-xs font-semibold" style={{color:"#475569"}}>{children}</div>
+      {hint && <div className="text-xs mt-0.5" style={{color:"#94a3b8"}}>{hint}</div>}
+    </div>
+  );
+}
+
+function RangeSlider({ value, onChange, color="#6366f1" }) {
+  const pct = value;
+  return (
+    <input type="range" min={0} max={100} value={value}
+      onChange={e=>onChange(Number(e.target.value))}
+      style={{
+        width:"100%", background:`linear-gradient(to right,${color} ${pct}%,#e2e8f0 ${pct}%)`,
+        "--thumb-color": color
+      }}
+    />
+  );
+}
+
+function Stars({ value, onChange, color }) {
+  return (
+    <div className="flex gap-2">
+      {[1,2,3,4,5].map(s => (
+        <button key={s} className="star-btn" style={{transition:"transform 0.1s", background:"none", border:"none", cursor:"pointer", padding:0}}
+          onClick={()=>onChange(s===value?0:s)}>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill={s<=value?color:"none"} stroke={s<=value?color:"#cbd5e1"} strokeWidth="1.5">
+            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+          </svg>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Counter({ value, onChange, color }) {
+  const btnStyle = { width:"32px", height:"32px", borderRadius:"8px", border:"1px solid #e2e8f0", background:"#f8fafc", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"16px", color:"#64748b" };
+  return (
+    <div className="flex items-center gap-3">
+      <button style={btnStyle} onClick={()=>onChange(Math.max(0,value-1))}>−</button>
+      <span className="text-2xl font-black" style={{color, minWidth:"44px", textAlign:"center"}}>{value}</span>
+      <button style={btnStyle} onClick={()=>onChange(value+1)}>+</button>
+    </div>
+  );
+}
+
+function Toggle({ value, onChange }) {
+  return (
+    <div className="flex gap-2">
+      {[{v:true,l:"예"},{v:false,l:"아니오"}].map(({v,l}) => (
+        <button key={String(v)} onClick={()=>onChange(v)}
+          style={{
+            padding:"6px 16px", borderRadius:"8px", fontSize:"12px", fontWeight:"700",
+            cursor:"pointer", transition:"all 0.15s",
+            background: value===v ? (v?"#d1fae5":"#fee2e2") : "#f8fafc",
+            color: value===v ? (v?"#059669":"#dc2626") : "#94a3b8",
+            border: `1.5px solid ${value===v?(v?"#6ee7b7":"#fca5a5"):"#e2e8f0"}`
+          }}>
+          {l}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Checkbox({ checked, onChange, label }) {
+  return (
+    <button onClick={()=>onChange(!checked)} className="flex items-center gap-2"
+      style={{background:"none", border:"none", cursor:"pointer", padding:0}}>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill={checked?"#0d9488":"none"} stroke={checked?"#0d9488":"#cbd5e1"} strokeWidth="2">
+        {checked
+          ? <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>
+          : <circle cx="12" cy="12" r="10"/>}
+      </svg>
+      <span style={{fontSize:"14px", color: checked?"#374151":"#94a3b8", fontWeight: checked?"600":"400"}}>{label}</span>
+    </button>
+  );
+}
+
+function ProgressRing({ value, color="#6366f1" }) {
+  const size=124, stroke=11, r=(size-stroke)/2, circ=2*Math.PI*r, offset=circ-(value/100)*circ;
+  return (
+    <div style={{position:"relative", width:size, height:size, flexShrink:0}}>
+      <svg width={size} height={size} style={{transform:"rotate(-90deg)"}}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#f1f5f9" strokeWidth={stroke}/>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+          strokeDasharray={circ} strokeDashoffset={offset} strokeLinecap="round"
+          style={{transition:"stroke-dashoffset 0.6s cubic-bezier(.4,0,.2,1)"}}/>
+      </svg>
+      <div style={{position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center"}}>
+        <span style={{fontSize:"22px", fontWeight:"900", color:"#1e293b"}}>{value}%</span>
+        <span style={{fontSize:"11px", color:"#94a3b8"}}>달성률</span>
+      </div>
+    </div>
+  );
+}
+
+function MoodPicker({ value, onChange }) {
+  const moods=[{s:1,e:"😞",l:"힘듦"},{s:2,e:"😕",l:"우울"},{s:3,e:"😐",l:"보통"},{s:4,e:"🙂",l:"좋음"},{s:5,e:"😄",l:"최고"}];
+  return (
+    <div className="flex gap-2">
+      {moods.map(({s,e,l}) => (
+        <button key={s} onClick={()=>onChange(s===value?0:s)}
+          style={{
+            flex:1, padding:"8px 4px", borderRadius:"12px", border:`1.5px solid ${value===s?"#fbbf24":"#e2e8f0"}`,
+            background: value===s?"#fef3c7":"#f8fafc", cursor:"pointer",
+            transform: value===s?"scale(1.08)":"scale(1)", transition:"all 0.15s",
+            display:"flex", flexDirection:"column", alignItems:"center", gap:"4px"
+          }}>
+          <span style={{fontSize:"20px"}}>{e}</span>
+          <span style={{fontSize:"11px", color: value===s?"#92400e":"#94a3b8"}}>{l}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── Login ──────────────────────────────────────────────────
+function LoginScreen({ onLogin }) {
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  const handle = async () => {
+    setError(""); setSuccess("");
+    if (!email || !pw) { setError("이메일과 비밀번호를 입력해주세요"); return; }
+    setLoading(true);
+    try {
+      if (mode==="signup") { await signUp(email, pw); setSuccess("가입 완료! 로그인해주세요 🎉"); setMode("login"); }
+      else { await signIn(email, pw); onLogin(); }
+    } catch(e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const inputStyle = { width:"100%", padding:"10px 12px 10px 36px", borderRadius:"12px", border:"1.5px solid #e2e8f0", background:"#f8fafc", fontSize:"14px", color:"#374151", outline:"none", fontFamily:"inherit" };
+
+  return (
+    <div style={{minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:"16px", background:"linear-gradient(160deg,#f0f4ff 0%,#faf8f5 50%,#f0fdf8 100%)"}}>
+      <div style={{width:"100%", maxWidth:"360px"}}>
+        <div style={{textAlign:"center", marginBottom:"32px"}}>
+          <div style={{width:"56px", height:"56px", borderRadius:"16px", background:"linear-gradient(135deg,#6366f1,#8b5cf6)", display:"flex", alignItems:"center", justifyContent:"center", margin:"0 auto 16px", boxShadow:"0 8px 24px #6366f133"}}>
+            <span style={{fontSize:"24px"}}>🛡️</span>
+          </div>
+          <h1 style={{fontSize:"24px", fontWeight:"900", color:"#1e293b", margin:0}}>방패 대시보드</h1>
+          <p style={{fontSize:"13px", color:"#94a3b8", marginTop:"6px"}}>시험 준비 멘탈 관리 시스템</p>
+        </div>
+
+        <div className="card" style={{padding:"24px"}}>
+          <div style={{display:"flex", background:"#f1f5f9", borderRadius:"12px", padding:"4px", marginBottom:"20px"}}>
+            {["login","signup"].map(m => (
+              <button key={m} onClick={()=>{setMode(m);setError("");setSuccess("");}}
+                style={{flex:1, padding:"6px", borderRadius:"8px", fontSize:"12px", fontWeight:"700", border:"none", cursor:"pointer", transition:"all 0.15s",
+                  background:mode===m?"white":"transparent", color:mode===m?"#6366f1":"#94a3b8",
+                  boxShadow:mode===m?"0 1px 4px rgba(0,0,0,0.08)":"none"}}>
+                {m==="login"?"로그인":"회원가입"}
+              </button>
+            ))}
+          </div>
+
+          <div style={{display:"flex", flexDirection:"column", gap:"12px"}}>
+            <div style={{position:"relative"}}>
+              <span style={{position:"absolute", left:"12px", top:"50%", transform:"translateY(-50%)", fontSize:"14px"}}>✉️</span>
+              <input type="email" placeholder="이메일" value={email} onChange={e=>setEmail(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&handle()} style={inputStyle}/>
+            </div>
+            <div style={{position:"relative"}}>
+              <span style={{position:"absolute", left:"12px", top:"50%", transform:"translateY(-50%)", fontSize:"14px"}}>🔒</span>
+              <input type={showPw?"text":"password"} placeholder="비밀번호 (6자 이상)" value={pw}
+                onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==="Enter"&&handle()}
+                style={{...inputStyle, paddingRight:"40px"}}/>
+              <button onClick={()=>setShowPw(!showPw)}
+                style={{position:"absolute", right:"12px", top:"50%", transform:"translateY(-50%)", background:"none", border:"none", cursor:"pointer", fontSize:"14px"}}>
+                {showPw?"🙈":"👁️"}
+              </button>
+            </div>
+          </div>
+
+          {error && <div style={{marginTop:"12px", padding:"10px 12px", borderRadius:"10px", background:"#fff1f2", color:"#e11d48", fontSize:"13px"}}>{error}</div>}
+          {success && <div style={{marginTop:"12px", padding:"10px 12px", borderRadius:"10px", background:"#f0fdf4", color:"#15803d", fontSize:"13px"}}>{success}</div>}
+
+          <button onClick={handle} disabled={loading} className="btn-hover"
+            style={{marginTop:"16px", width:"100%", padding:"12px", borderRadius:"12px", border:"none", cursor:"pointer",
+              background:"linear-gradient(135deg,#6366f1,#8b5cf6)", color:"white", fontWeight:"700", fontSize:"14px",
+              boxShadow:"0 4px 16px #6366f133", transition:"transform 0.15s", opacity:loading?0.7:1,
+              display:"flex", alignItems:"center", justifyContent:"center", gap:"8px"}}>
+            {loading && <span className="spin" style={{display:"inline-block", width:"14px", height:"14px", border:"2px solid rgba(255,255,255,0.3)", borderTopColor:"white", borderRadius:"50%"}}/>}
+            {mode==="login"?"로그인하기":"회원가입하기"}
+          </button>
+        </div>
+        <p style={{textAlign:"center", fontSize:"12px", color:"#94a3b8", marginTop:"16px"}}>데이터는 Supabase 클라우드에 안전하게 저장돼요 ☁️</p>
+      </div>
+    </div>
+  );
+}
+
+// ── History Modal ──────────────────────────────────────────
+function HistoryModal({ allData, onClose }) {
+  const dates = Object.keys(allData).sort().reverse();
+  const sc = v => v>=70?"#10b981":v>=45?"#f59e0b":"#f43f5e";
+  const score = e => {
+    const s=(e.weeklyGoal*0.35)+(e.proactiveScore*7)+Math.min(e.deepFocusHours*5,18);
+    const w=(e.physicalEnergy*0.18)+(e.postWorkoutRefresh*5);
+    const r=Math.max(0,18-e.emotionalDrain*0.18);
+    return Math.round(Math.min(100,(s+w+r)/1.35));
+  };
+  const me=["","😞","😕","😐","🙂","😄"];
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:50,display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",background:"rgba(15,23,42,0.5)",backdropFilter:"blur(6px)"}}>
+      <div style={{width:"100%",maxWidth:"640px",borderRadius:"20px",overflow:"hidden",background:"white",boxShadow:"0 24px 64px rgba(0,0,0,0.18)"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"16px 24px",borderBottom:"1px solid #f1f5f9"}}>
+          <span style={{fontSize:"14px",fontWeight:"700",color:"#374151"}}>📋 기록 히스토리</span>
+          <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:"18px",color:"#94a3b8"}}>✕</button>
+        </div>
+        {dates.length===0
+          ? <div style={{padding:"48px",textAlign:"center",color:"#94a3b8",fontSize:"14px"}}>아직 저장된 기록이 없어요 🌱</div>
+          : <div style={{overflowY:"auto",maxHeight:"60vh"}}>
+              {dates.map(d => {
+                const e=allData[d], s=score(e);
+                return (
+                  <div key={d} style={{display:"flex",alignItems:"center",gap:"16px",padding:"12px 24px",borderBottom:"1px solid #f8fafc"}}>
+                    <span style={{fontSize:"12px",color:"#94a3b8",fontFamily:"monospace",minWidth:"88px"}}>{d}</span>
+                    <div style={{flex:1,display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"8px",fontSize:"12px"}}>
+                      <div><span style={{color:"#94a3b8"}}>목표 </span><span style={{fontWeight:"600",color:"#374151"}}>{e.weeklyGoal}%</span></div>
+                      <div><span style={{color:"#94a3b8"}}>에너지 </span><span style={{fontWeight:"600",color:"#374151"}}>{e.physicalEnergy}%</span></div>
+                      <div><span style={{color:"#94a3b8"}}>감소 </span><span style={{fontWeight:"600",color:e.emotionalDrain>50?"#f43f5e":"#10b981"}}>{e.emotionalDrain}%</span></div>
+                      <div><span style={{color:"#94a3b8"}}>기분 </span><span>{me[e.moodScore||0]||"—"}</span></div>
+                    </div>
+                    {e.bodyWeight && <span style={{fontSize:"12px",color:"#94a3b8"}}>{e.bodyWeight}kg</span>}
+                    <div style={{textAlign:"right",minWidth:"40px"}}>
+                      <div style={{fontSize:"16px",fontWeight:"900",color:sc(s)}}>{s}</div>
+                      <div style={{fontSize:"11px",color:"#94a3b8"}}>점</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard ──────────────────────────────────────────────
+function Dashboard({ user, onLogout }) {
+  const today = formatDate(new Date());
+  const [selectedDate, setSelectedDate] = useState(today);
+  const [entry, setEntry] = useState(defaultEntry());
+  const [allData, setAllData] = useState({});
+  const [saved, setSaved] = useState(false);
+  const [saveFlash, setSaveFlash] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const all = await loadAllEntries(user.email);
+        setAllData(all);
+        setEntry({...defaultEntry(),...(all[today]||{})});
+        setSaved(!!all[today]);
+      } catch(e) { setErr(e.message); }
+      finally { setLoading(false); }
+    })();
+  }, []);
+
+  const switchDate = async (d) => {
+    setSelectedDate(d); setLoading(true);
+    try {
+      const data = await loadEntry(user.email, d);
+      setEntry({...defaultEntry(),...(data||{})});
+      setSaved(!!data);
+    } catch(e) { setErr(e.message); }
+    finally { setLoading(false); }
+  };
+
+  const set = useCallback((key, val) => { setEntry(p=>({...p,[key]:val})); setSaved(false); }, []);
+
+  const handleSave = async () => {
+    setSaving(true); setErr("");
+    try {
+      await saveEntry(user.email, selectedDate, entry);
+      setAllData(p=>({...p,[selectedDate]:entry}));
+      setSaved(true); setSaveFlash(true);
+      setTimeout(()=>setSaveFlash(false), 1800);
+    } catch(e) { setErr("저장 실패: "+e.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleLogout = async () => { await signOut(); onLogout(); };
+
+  const exportCSV = () => {
+    const rows = [
+      ["날짜","주간목표%","주체성","집중h","집중m","불안방어","요가","PT","개인운동","신체에너지%","리프레시","체중kg","응가","감정소모%","챗봇모드","조건부보상","기분점수","기분로그","메타인지","토닥임"],
+      ...Object.entries(allData).sort().map(([d,e])=>[
+        d,e.weeklyGoal,e.proactiveScore,e.deepFocusHours,e.deepFocusMinutes,e.anxietyDefenseCount,
+        e.routineYoga?"✓":"",e.routinePT?"✓":"",e.routinePersonal?"✓":"",
+        e.physicalEnergy,e.postWorkoutRefresh,e.bodyWeight||"",
+        e.poopDone===null?"":e.poopDone?"✓":"✗",e.emotionalDrain,
+        e.chatbotMode===null?"":e.chatbotMode?"예":"아니오",
+        e.rewardRuleMet===null?"":e.rewardRuleMet?"예":"아니오",
+        e.moodScore||"",e.moodLog?.replace(/\n/g," ")||"",
+        e.metacognitionLog?.replace(/\n/g," ")||"",e.selfCompassionCount
+      ])
+    ];
+    const csv=rows.map(r=>r.map(v=>`"${v}"`).join(",")).join("\n");
+    const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a"); a.href=url; a.download=`dashboard_${today}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const warn = entry.emotionalDrain > 50;
+  const isToday = selectedDate === today;
+  const moodLabel = ["","😞 힘든 하루","😕 우울했어","😐 그냥 그랬어","🙂 좋은 하루","😄 최고의 하루"];
+
+  const hdrBtn = (onClick, children, extra={}) => (
+    <button onClick={onClick} className="btn-hover"
+      style={{display:"flex",alignItems:"center",gap:"6px",padding:"6px 12px",borderRadius:"10px",fontSize:"12px",fontWeight:"600",border:"1px solid #e2e8f0",background:"#f8fafc",color:"#64748b",cursor:"pointer",transition:"transform 0.1s",...extra}}>
+      {children}
+    </button>
+  );
+
+  return (
+    <div style={{minHeight:"100vh",background:"linear-gradient(160deg,#f0f4ff 0%,#faf8f5 50%,#f0fdf8 100%)"}}>
+
+      {/* Header */}
+      <div style={{position:"sticky",top:0,zIndex:40,padding:"10px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",background:"rgba(255,255,255,0.85)",backdropFilter:"blur(16px)",borderBottom:"1px solid #e2e8f0",boxShadow:"0 1px 8px rgba(0,0,0,0.04)"}}>
+        <div className="flex items-center gap-2">
+          <div style={{width:"32px",height:"32px",borderRadius:"10px",background:"linear-gradient(135deg,#6366f1,#8b5cf6)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+            <span style={{fontSize:"15px"}}>🛡️</span>
+          </div>
+          <div>
+            <div style={{fontSize:"14px",fontWeight:"900",color:"#1e293b"}}>방패 대시보드</div>
+            <div style={{fontSize:"11px",color:"#94a3b8"}}>{user.email}</div>
+          </div>
+        </div>
+
+        <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+          <button onClick={()=>switchDate(formatDate(new Date(parseDate(selectedDate).setDate(parseDate(selectedDate).getDate()-1))))}
+            style={{padding:"6px 10px",borderRadius:"8px",border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:"14px"}}>◀</button>
+          <div style={{display:"flex",alignItems:"center",gap:"8px",padding:"6px 12px",borderRadius:"10px",background:"#f8fafc",border:"1px solid #e2e8f0"}}>
+            <span style={{fontSize:"13px"}}>📅</span>
+            <input type="date" value={selectedDate} max={today} onChange={e=>switchDate(e.target.value)}
+              style={{fontSize:"12px",background:"transparent",color:"#374151",border:"none",outline:"none",cursor:"pointer",fontFamily:"inherit"}}/>
+            {isToday && <span style={{fontSize:"11px",padding:"2px 6px",borderRadius:"6px",background:"#ede9fe",color:"#6d28d9",fontWeight:"700"}}>오늘</span>}
+          </div>
+          <button onClick={()=>switchDate(formatDate(new Date(parseDate(selectedDate).setDate(parseDate(selectedDate).getDate()+1))))}
+            disabled={selectedDate>=today}
+            style={{padding:"6px 10px",borderRadius:"8px",border:"1px solid #e2e8f0",background:"#f8fafc",cursor:"pointer",fontSize:"14px",opacity:selectedDate>=today?0.3:1}}>▶</button>
+        </div>
+
+        <div style={{display:"flex",gap:"8px"}}>
+          {hdrBtn(()=>setShowHistory(true), <><span>📋</span> 히스토리</>)}
+          {hdrBtn(exportCSV, <><span>⬇️</span> CSV</>)}
+          {hdrBtn(handleLogout, <><span>🚪</span> 로그아웃</>, {color:"#e11d48",background:"#fff1f2",borderColor:"#fecdd3"})}
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"60vh",gap:"12px"}}>
+          <div className="spin" style={{width:"32px",height:"32px",border:"3px solid #e2e8f0",borderTopColor:"#6366f1",borderRadius:"50%"}}/>
+          <div style={{fontSize:"14px",color:"#94a3b8"}}>데이터 불러오는 중...</div>
+        </div>
+      ) : (
+      <div style={{maxWidth:"1100px",margin:"0 auto",padding:"28px 24px",display:"flex",flexDirection:"column",gap:"20px"}}>
+
+        {err && <div style={{padding:"12px 16px",borderRadius:"12px",background:"#fff1f2",border:"1px solid #fecdd3",color:"#e11d48",fontSize:"13px"}}>⚠️ {err}</div>}
+
+        {warn && (
+          <div className="pulse-warn" style={{padding:"14px 20px",borderRadius:"16px",display:"flex",alignItems:"center",gap:"12px",background:"linear-gradient(90deg,#fff1f2,#ffe4e6)",border:"1.5px solid #fecdd3"}}>
+            <span style={{fontSize:"20px"}}>🚨</span>
+            <div style={{flex:1}}>
+              <div style={{fontSize:"14px",fontWeight:"700",color:"#be123c"}}>감정 누수 경고! 본업 집중 요망</div>
+              <div style={{fontSize:"12px",color:"#fb7185",marginTop:"2px"}}>감정 소모도 {entry.emotionalDrain}% — 지금 바로 공부로 복귀하세요.</div>
+            </div>
+            <div style={{fontSize:"28px",fontWeight:"900",color:"#fecdd3"}}>{entry.emotionalDrain}%</div>
+          </div>
+        )}
+
+        {/* KPI Strip */}
+        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"16px"}}>
+          {[
+            {l:"주간 달성률",v:`${entry.weeklyGoal}%`,c:C.study,e:"📈"},
+            {l:"순공 시간",v:`${entry.deepFocusHours}h ${entry.deepFocusMinutes}m`,c:C.workout,e:"⏱️"},
+            {l:"불안 방어",v:`${entry.anxietyDefenseCount}회`,c:"#8b5cf6",e:"🛡️"},
+            {l:"셀프 토닥임",v:`${entry.selfCompassionCount}회`,c:C.mental,e:"✨"},
+          ].map(({l,v,c,e})=>(
+            <div key={l} className="card" style={{padding:"16px",display:"flex",alignItems:"center",gap:"12px"}}>
+              <div style={{width:"36px",height:"36px",borderRadius:"10px",background:c+"15",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"18px",flexShrink:0}}>{e}</div>
+              <div>
+                <div style={{fontSize:"11px",color:"#94a3b8",fontWeight:"500"}}>{l}</div>
+                <div style={{fontSize:"18px",fontWeight:"900",color:"#1e293b"}}>{v}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Main Grid */}
+        <div style={{display:"grid",gridTemplateColumns:"5fr 4fr 3fr",gap:"20px"}}>
+
+          {/* 공부 */}
+          <SectionCard emoji="📚" title="공부 — 방패 제작" subtitle="주도권 지표" color={C.study}>
+            <div style={{display:"flex",alignItems:"center",gap:"20px"}}>
+              <ProgressRing value={entry.weeklyGoal} color={C.study}/>
+              <div style={{flex:1}}>
+                <Label>주간 목표 완수율</Label>
+                <RangeSlider value={entry.weeklyGoal} onChange={v=>set("weeklyGoal",v)} color={C.study}/>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:"#cbd5e1",marginTop:"4px"}}><span>0%</span><span>100%</span></div>
+              </div>
+            </div>
+            <div>
+              <Label hint="스스로 주도했는가, 끌려다녔는가">주체적 공부 점수</Label>
+              <Stars value={entry.proactiveScore} onChange={v=>set("proactiveScore",v)} color={C.study}/>
+            </div>
+            <div>
+              <Label>도파민 순공 시간</Label>
+              <div style={{display:"flex",gap:"12px"}}>
+                {[["deepFocusHours","시간",24],["deepFocusMinutes","분",59]].map(([key,unit,max])=>(
+                  <div key={key} style={{display:"flex",alignItems:"center",gap:"8px"}}>
+                    <input type="number" min={0} max={max} value={entry[key]}
+                      onChange={e=>set(key,Math.max(0,Math.min(max,Number(e.target.value))))}
+                      style={{width:"64px",padding:"6px 8px",borderRadius:"10px",border:"1.5px solid #e2e8f0",background:"#f8fafc",textAlign:"center",fontSize:"14px",fontWeight:"700",color:"#374151",outline:"none",fontFamily:"inherit"}}/>
+                    <span style={{fontSize:"12px",color:"#94a3b8"}}>{unit}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <Label hint="불안 올라왔을 때 공부로 복귀한 횟수">불안 조절 횟수</Label>
+              <Counter value={entry.anxietyDefenseCount} onChange={v=>set("anxietyDefenseCount",v)} color="#8b5cf6"/>
+            </div>
+          </SectionCard>
+
+          {/* 운동 + 연애 */}
+          <div style={{display:"flex",flexDirection:"column",gap:"20px"}}>
+            <SectionCard emoji="🧘‍♀️" title="운동 — 멘탈 배터리" subtitle="충전 지표" color={C.workout}>
+              <div>
+                <Label>루틴 사수 여부</Label>
+                <div style={{display:"flex",gap:"16px"}}>
+                  <Checkbox checked={entry.routineYoga} onChange={v=>set("routineYoga",v)} label="요가"/>
+                  <Checkbox checked={entry.routinePT} onChange={v=>set("routinePT",v)} label="PT"/>
+                  <Checkbox checked={entry.routinePersonal} onChange={v=>set("routinePersonal",v)} label="자체운동"/>
+                </div>
+              </div>
+              <div>
+                <Label>신체 에너지 레벨 <span style={{fontWeight:"700",color:C.workout,marginLeft:"6px"}}>{entry.physicalEnergy}%</span></Label>
+                <RangeSlider value={entry.physicalEnergy} onChange={v=>set("physicalEnergy",v)} color={C.workout}/>
+              </div>
+              <div>
+                <Label hint="운동 후 머리가 얼마나 맑아졌는가">운동 후 리프레시 지수</Label>
+                <Stars value={entry.postWorkoutRefresh} onChange={v=>set("postWorkoutRefresh",v)} color={C.workout}/>
+              </div>
+            </SectionCard>
+
+            <SectionCard emoji="💔" title="연애 — 보험 유지비" subtitle="리스크 관리 지표" color={C.romance}>
+              <div>
+                <Label>감정 소모도
+                  <span style={{fontWeight:"700",color:warn?"#f43f5e":"#10b981",marginLeft:"8px"}}>{entry.emotionalDrain}%</span>
+                  {warn && <span style={{fontSize:"11px",color:"#f43f5e",fontWeight:"700",marginLeft:"4px"}}>⚠ 위험</span>}
+                </Label>
+                <RangeSlider value={entry.emotionalDrain} onChange={v=>set("emotionalDrain",v)} color={warn?"#f43f5e":C.romance}/>
+              </div>
+              <div>
+                <Label hint="건조하고 논리적으로 응대했는가">챗봇 모드 사수</Label>
+                <Toggle value={entry.chatbotMode} onChange={v=>set("chatbotMode",v)}/>
+              </div>
+              <div>
+                <Label hint="공부 목표 달성 후에만 집중">조건부 보상제 준수</Label>
+                <Toggle value={entry.rewardRuleMet} onChange={v=>set("rewardRuleMet",v)}/>
+              </div>
+            </SectionCard>
+          </div>
+
+          {/* 건강 + 멘탈 */}
+          <div style={{display:"flex",flexDirection:"column",gap:"20px"}}>
+            <SectionCard emoji="💚" title="건강 체크" subtitle="바디 & 컨디션" color={C.health}>
+              <div>
+                <Label>체중 기록</Label>
+                <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+                  <input type="number" min={30} max={150} step={0.1} value={entry.bodyWeight}
+                    onChange={e=>set("bodyWeight",e.target.value)} placeholder="00.0"
+                    style={{width:"88px",padding:"8px",borderRadius:"10px",border:"1.5px solid #e2e8f0",background:"#f8fafc",textAlign:"center",fontSize:"14px",fontWeight:"700",color:"#374151",outline:"none",fontFamily:"inherit"}}/>
+                  <span style={{fontSize:"14px",color:"#94a3b8",fontWeight:"500"}}>kg</span>
+                </div>
+              </div>
+              <div>
+                <Label hint="오늘 쾌변했나요? 🚽">응가 여부</Label>
+                <div style={{display:"flex",gap:"8px"}}>
+                  {[{v:true,e:"✅",l:"했어요"},{v:false,e:"❌",l:"못했어요"}].map(({v,e,l})=>(
+                    <button key={String(v)} onClick={()=>set("poopDone",v)}
+                      style={{flex:1,padding:"8px 4px",borderRadius:"10px",fontSize:"12px",fontWeight:"700",border:`1.5px solid ${entry.poopDone===v?(v?"#6ee7b7":"#fca5a5"):"#e2e8f0"}`,
+                        background:entry.poopDone===v?(v?"#d1fae5":"#fee2e2"):"#f8fafc",
+                        color:entry.poopDone===v?(v?"#065f46":"#991b1b"):"#94a3b8",cursor:"pointer"}}>
+                      {e}<br/><span style={{fontSize:"11px"}}>{l}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={{borderRadius:"12px",padding:"12px",background:"#f8fafc",display:"flex",flexDirection:"column",gap:"8px"}}>
+                {[{l:"신체 에너지",v:entry.physicalEnergy,c:C.workout},{l:"감정 소모",v:entry.emotionalDrain,c:warn?"#f43f5e":C.romance}].map(({l,v,c})=>(
+                  <div key={l}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",marginBottom:"4px"}}>
+                      <span style={{color:"#64748b"}}>{l}</span><span style={{fontWeight:"700",color:c}}>{v}%</span>
+                    </div>
+                    <div style={{height:"6px",borderRadius:"9999px",background:"#e2e8f0"}}>
+                      <div style={{height:"100%",borderRadius:"9999px",background:c,width:`${v}%`,transition:"width 0.5s"}}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </SectionCard>
+
+            <SectionCard emoji="🧠" title="종합 멘탈" subtitle="메타인지 & 자기 위로" color={C.mental}>
+              <div style={{borderRadius:"10px",padding:"10px",background:"#f8fafc"}}>
+                {[
+                  {l:"주체성",v:entry.proactiveScore?`${entry.proactiveScore}/5`:"—",c:C.study},
+                  {l:"챗봇모드",v:entry.chatbotMode===null?"—":entry.chatbotMode?"유지 ✓":"실패 ✗",c:entry.chatbotMode?"#10b981":entry.chatbotMode===null?"#94a3b8":"#f43f5e"},
+                  {l:"조건부보상",v:entry.rewardRuleMet===null?"—":entry.rewardRuleMet?"준수 ✓":"위반 ✗",c:entry.rewardRuleMet?"#10b981":entry.rewardRuleMet===null?"#94a3b8":"#f43f5e"},
+                ].map(({l,v,c})=>(
+                  <div key={l} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid #f1f5f9"}}>
+                    <span style={{fontSize:"12px",color:"#94a3b8"}}>{l}</span>
+                    <span style={{fontSize:"12px",fontWeight:"700",color:c}}>{v}</span>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <Label hint="3인칭 시점 — '그녀는 오늘...'">오늘의 메타인지</Label>
+                <textarea value={entry.metacognitionLog} onChange={e=>set("metacognitionLog",e.target.value)}
+                  placeholder="예: 그녀는 오늘 불안했지만 방패를 들었다." rows={3}
+                  style={{width:"100%",padding:"10px",borderRadius:"10px",border:"1.5px solid #e2e8f0",background:"#f8fafc",fontSize:"12px",color:"#374151",resize:"none",outline:"none",fontFamily:"inherit"}}/>
+              </div>
+              <div>
+                <Label>셀프 토닥임 횟수</Label>
+                <Counter value={entry.selfCompassionCount} onChange={v=>set("selfCompassionCount",v)} color={C.mental}/>
+              </div>
+            </SectionCard>
+          </div>
+        </div>
+
+        {/* 기분 */}
+        <div className="card" style={{padding:"20px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:"12px",paddingBottom:"12px",marginBottom:"16px",borderBottom:"1px solid #f1f5f9"}}>
+            <div style={{width:"36px",height:"36px",borderRadius:"10px",background:"#fef3c7",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"18px"}}>🌤</div>
+            <div>
+              <div style={{fontSize:"14px",fontWeight:"700",color:"#1e293b"}}>오늘의 기분</div>
+              <div style={{fontSize:"12px",color:"#94a3b8"}}>감정 온도계 & 자유 기록</div>
+            </div>
+            {entry.moodScore>0 && <div style={{marginLeft:"auto",fontSize:"28px"}}>{"😞😕😐🙂😄".split("")[entry.moodScore-1]}</div>}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"5fr 7fr",gap:"20px"}}>
+            <div>
+              <Label>기분 선택</Label>
+              <MoodPicker value={entry.moodScore} onChange={v=>set("moodScore",v)}/>
+              {entry.moodScore>0 && <div style={{marginTop:"8px",textAlign:"center",fontSize:"12px",fontWeight:"600",color:"#92400e"}}>{moodLabel[entry.moodScore]}</div>}
+            </div>
+            <div>
+              <Label hint="오늘 있었던 일, 느낀 감정, 뭐든 자유롭게 ✏️">오늘 기분 & 감정 일지</Label>
+              <textarea value={entry.moodLog} onChange={e=>set("moodLog",e.target.value)}
+                placeholder="오늘 어떤 감정들이 지나갔나요? 솔직하게 써봐요. 아무도 안 봐요 🙈" rows={4}
+                style={{width:"100%",padding:"10px 12px",borderRadius:"10px",border:"1.5px solid #e2e8f0",background:"#f8fafc",fontSize:"13px",color:"#374151",resize:"none",outline:"none",lineHeight:"1.6",fontFamily:"inherit"}}/>
+            </div>
+          </div>
+        </div>
+
+        {/* Save */}
+        <div style={{display:"flex",justifyContent:"center",alignItems:"center",gap:"12px",paddingBottom:"40px"}}>
+          <button onClick={handleSave} disabled={saving} className="btn-hover"
+            style={{display:"flex",alignItems:"center",gap:"10px",padding:"14px 40px",borderRadius:"16px",border:"none",cursor:"pointer",fontWeight:"700",fontSize:"14px",color:"white",transition:"transform 0.15s",
+              background:saveFlash?"linear-gradient(135deg,#10b981,#059669)":"linear-gradient(135deg,#6366f1,#8b5cf6)",
+              boxShadow:saveFlash?"0 8px 24px #10b98144":"0 8px 24px #6366f133",opacity:saving?0.7:1}}>
+            {saving
+              ? <span className="spin" style={{display:"inline-block",width:"16px",height:"16px",border:"2px solid rgba(255,255,255,0.3)",borderTopColor:"white",borderRadius:"50%"}}/>
+              : <span>{saveFlash?"✅":"💾"}</span>}
+            {saving?"저장 중...":saveFlash?"저장 완료!":"오늘 기록 저장하기"}
+          </button>
+          {saved && !saveFlash && <span style={{fontSize:"12px",color:"#10b981",fontWeight:"600"}}>☁️ 클라우드에 저장됨</span>}
+        </div>
+      </div>
+      )}
+      {showHistory && <HistoryModal allData={allData} onClose={()=>setShowHistory(false)}/>}
+    </div>
+  );
+}
+
+// ── App Root ───────────────────────────────────────────────
+function App() {
+  const [user, setUser] = useState(getUser);
+  const [token, setTok] = useState(getToken);
+  return (!user || !token)
+    ? <LoginScreen onLogin={()=>{setUser(getUser()); setTok(getToken());}}/>
+    : <Dashboard user={user} onLogout={()=>{setUser(null); setTok(null);}}/>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
